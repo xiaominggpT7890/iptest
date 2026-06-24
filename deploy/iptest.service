@@ -1,0 +1,22 @@
+[Unit]
+Description=iptest - SOCKS5 IP pool probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/call/iptest
+ExecStart=/call/iptest/iptest -listen 127.0.0.1:8088 -db /call/iptest/iptest.db
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+LimitNPROC=1048576
+Environment=GOMAXPROCS=0
+
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=iptest
+
+[Install]
+WantedBy=multi-user.target

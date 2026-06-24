@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>iptest — SOCKS5 IP 池测试</title>
+<base href="./">
+<link rel="stylesheet" href="ui/style.css?v=10">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%232563eb'><circle cx='12' cy='12' r='10'/></svg>">
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+<div id="app" x-data="iptestApp()" x-init="init()" x-cloak>
+
+  <header class="topbar">
+    <h1>
+      <i data-lucide="globe-2" class="logo"></i>
+      iptest <small>SOCKS5 IP 池探测</small>
+    </h1>
+    <nav>
+      <button :class="{active:view==='list'}" @click="view='list'">
+        <i data-lucide="list-checks"></i><span>任务列表</span>
+      </button>
+      <button :class="{active:view==='new'}" @click="goNew()">
+        <i data-lucide="plus"></i><span>新建任务</span>
+      </button>
+      <button @click="openSystem()" title="服务器状态">
+        <i data-lucide="activity"></i><span>系统</span>
+      </button>
+    </nav>
+  </header>
+
+  <main x-show="view==='list'" class="container">
+    <div class="bar">
+      <h2>任务列表 <small x-text="`(${tasks.length})`"></small></h2>
+      <button class="btn" @click="loadTasks()"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+    </div>
+
+    <div class="table-wrap">
+    <table class="task-table">
+      <thead>
+        <tr>
+          <th>#</th><th>名称</th><th>状态</th><th>运行时长</th>
+          <th>请求数</th><th>成功率</th><th>独立IP</th><th>国家</th>
+          <th>重复度</th><th>QPS</th><th>延迟</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="t in tasks" :key="t.id">
+          <tr>
+            <td x-text="t.id"></td>
+            <td>
+              <a href="#" @click.prevent="openReport(t.id)" x-text="t.name"></a>
+            </td>
+            <td><span class="badge" :class="'st-'+t.state" x-text="t.state"></span></td>
+            <td x-text="formatDuration(t.elapsed_seconds_live || t.elapsed_seconds)"></td>
+            <td x-text="(t.running?.total_reqs ?? t.total_requests).toLocaleString()"></td>
+            <td x-text="successRate(t)"></td>
+            <td x-text="(t.running?.unique_ips ?? t.unique_ips).toLocaleString()"></td>
+            <td x-text="t.running?.unique_countries ?? t.unique_countries"></td>
+            <td x-text="dupRateRow(t)"></td>
+            <td x-text="liveQps(t)"></td>
+            <td x-text="formatLatencyForRow(t)"></td>
+            <td class="actions">
+              <button x-show="t.state==='created' || t.state==='paused' || t.state==='completed' || t.state==='stopped' || t.state==='failed'" @click="act(t.id,'start')" title="开始 / 继续">
+                <i data-lucide="play"></i>
+              </button>
+              <button x-show="t.state==='running'" @click="act(t.id,'pause')" title="暂停">
+                <i data-lucide="pause"></i>
+              </button>
+              <button @click="openReport(t.id)" title="报表">
+                <i data-lucide="bar-chart-3"></i>
+              </button>
+              <button x-show="t.state!=='running'" @click="editTask(t.id)" title="编辑">
+                <i data-lucide="pencil"></i>
+              </button>
+              <button @click="cloneTask(t.id)" title="复制任务">
+                <i data-lucide="copy"></i>
+              </button>
+              <button x-show="t.state!=='running'" @click="confirmClear(t.id)" class="warn" title="清空数据">
+                <i data-lucide="eraser"></i>
+              </button>
+              <button x-show="t.state!=='running'" @click="confirmDelete(t.id)" class="danger" title="删除">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    </div>
+    <div x-show="tasks.length===0" class="empty">
+      <i data-lucide="inbox" class="big-icon"></i>
+      <p>尚无任务，点击右上角"新建任务"开始</p>
+    </div>
+  </main>
+
+  <main x-show="view==='new'" class="container">
+    <h2><i data-lucide="plus-circle"></i> <span x-text="form._editingId ? `编辑任务 #${form._editingId}` : (form._editing ? '复制任务' : '新建测试任务')"></span></h2>
+    <form @submit.prevent="createTask()" class="form-grid">
+
+      <fieldset class="full">
+        <legend><i data-lucide="settings-2"></i> 基础</legend>
+        <div class="row">
+          <label class="col">任务名称
+            <input x-model="form.name" placeholder="例如: us-pool-1h">
+          </label>
+          <label class="col">目标 URL
+            <input x-model="form.target_url">
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset class="full">
+        <legend><i data-lucide="network"></i> SOCKS5 代理</legend>
+        <div class="row">
+          <label class="col-small">协议
+            <select x-model="form.proxy.scheme">
+              <option value="socks5">socks5</option>
+              <option value="socks5h">socks5h</option>
+            </select>
+          </label>
+          <label class="col-grow">代理模板 <span class="req">*</span>
+            <input x-model="form.proxy.template" spellcheck="false"
+              placeholder="user-xxx-region-us-sessid-{num}-sesstime-600:PASS@host:port">
+            <span class="hint">
+              <i data-lucide="info"></i>
+              格式 <code>USER:PASS@HOST:PORT</code>，USER 必须包含 <code>{num}</code> 占位符 (会被替换为 sessid)。
+              点击下方示例可一键填入：
+              <br>
+              <code class="clickable" @click="form.proxy.template='user-zphdrj4g-region-us-sessid-{num}-sesstime-600:U9NR5Dr4@gate3.abcsocks.cloud:9102'">user-zphdrj4g-region-us-sessid-{num}-sesstime-600:U9NR5Dr4@gate3.abcsocks.cloud:9102</code>
+            </span>
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend><i data-lucide="hash"></i> sessid 范围</legend>
+        <div class="row">
+          <label class="col">最小 <input type="number" x-model.number="form.sessid_range.min"></label>
+          <label class="col">最大 <input type="number" x-model.number="form.sessid_range.max"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend><i data-lucide="gauge"></i> 运行参数</legend>
+        <div class="row">
+          <label class="col">时长(秒,0=不限) <input type="number" x-model.number="form.duration_seconds"></label>
+          <label class="col">并发 <input type="number" x-model.number="form.concurrency"></label>
+          <label class="col">超时(ms) <input type="number" x-model.number="form.request_timeout_ms"></label>
+        </div>
+        <div class="presets">
+          <button type="button" @click="form.duration_seconds=1800">30分钟</button>
+          <button type="button" @click="form.duration_seconds=3600">1小时</button>
+          <button type="button" @click="form.duration_seconds=7200">2小时</button>
+          <button type="button" @click="form.duration_seconds=0">不限</button>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend><i data-lucide="droplets"></i> ① 池子探测 (PoolSweep)</legend>
+        <label class="check"><input type="checkbox" x-model="form.pool_sweep.enabled"> 启用</label>
+        <label>重复度滑动窗口大小 <input type="number" x-model.number="form.pool_sweep.hit_rate_window_size"></label>
+        <label>重复度自动停止阈值(0=关) <input type="number" step="0.01" min="0" max="1" x-model.number="form.pool_sweep.stop_when_hit_rate_above"></label>
+      </fieldset>
+
+      <fieldset>
+        <legend><i data-lucide="anchor"></i> ② 粘性探针 (Stickiness)</legend>
+        <label class="check"><input type="checkbox" x-model="form.stickiness_probe.enabled"> 启用</label>
+        <label>跟踪 sessid 数 <input type="number" x-model.number="form.stickiness_probe.sessid_count"></label>
+        <label>轮询间隔(秒,逗号分隔)
+          <input x-model="probeScheduleStr" placeholder="60,60,120,300">
+        </label>
+        <label class="check"><input type="checkbox" x-model="form.stickiness_probe.loop_schedule"> 时间表循环</label>
+      </fieldset>
+
+      <div class="form-action full">
+        <button class="btn" type="button" @click="view='list'">
+          <i data-lucide="arrow-left"></i> 取消
+        </button>
+        <button class="btn primary" type="submit">
+          <i data-lucide="save"></i> <span x-text="form._editingId ? '保存修改' : '保存'"></span>
+        </button>
+        <button class="btn success" type="button" @click="createTask(true)" x-show="!form._editingId">
+          <i data-lucide="rocket"></i> 保存并开始
+        </button>
+      </div>
+    </form>
+  </main>
+
+  <main x-show="view==='report' && report" class="container">
+    <div x-show="report?._loading" class="loading-bar">
+      <i data-lucide="loader-2" class="spin"></i> 报表正在加载中（大数据量任务可能需要几秒）...
+    </div>
+    <div class="bar">
+      <h2>
+        <i data-lucide="bar-chart-3"></i>
+        <span x-text="report?.task?.name"></span>
+        <small>#<span x-text="report?.task?.id"></span></small>
+      </h2>
+      <div class="actions-bar">
+        <button class="btn" @click="view='list'"><i data-lucide="arrow-left"></i> 返回</button>
+        <button class="btn" @click="loadReport(currentReportID)"><i data-lucide="refresh-cw"></i> 刷新</button>
+        <button class="btn" @click="cloneTask(currentReportID)"><i data-lucide="copy"></i> 复制此任务</button>
+      </div>
+    </div>
+
+    <section class="card param-card">
+      <h3><i data-lucide="settings-2"></i> 任务参数</h3>
+      <div class="param-grid">
+        <div class="full"><label>代理模板</label><code class="param-code mono" :title="report?.task?.config?.proxy?.template" x-text="report?.task?.config?.proxy?.template"></code></div>
+        <div class="full"><label>目标 URL</label><code class="mono" :title="report?.task?.config?.target_url" x-text="report?.task?.config?.target_url"></code></div>
+        <div><label>协议</label><code x-text="report?.task?.config?.proxy?.scheme || 'socks5'"></code></div>
+        <div><label>并发</label><code x-text="report?.task?.config?.concurrency"></code></div>
+        <div><label>sessid 范围</label><code x-text="`${report?.task?.config?.sessid_range?.min?.toLocaleString()} ~ ${report?.task?.config?.sessid_range?.max?.toLocaleString()}`"></code></div>
+        <div><label>计划时长</label><code x-text="formatDuration(report?.task?.config?.duration_seconds)"></code></div>
+        <div><label>请求超时</label><code x-text="(report?.task?.config?.request_timeout_ms||0)+' ms'"></code></div>
+        <div class="full"><label>PoolSweep</label><code x-text="report?.task?.config?.pool_sweep?.enabled ? `启用 (窗口=${report?.task?.config?.pool_sweep?.hit_rate_window_size})` : '关闭'"></code></div>
+        <div class="full"><label>StickinessProbe</label><code :title="report?.task?.config?.stickiness_probe?.enabled ? `${report?.task?.config?.stickiness_probe?.sessid_count} sessid; 时间表=${(report?.task?.config?.stickiness_probe?.poll_schedule_seconds||[]).join(',')}s` : '关闭'" x-text="report?.task?.config?.stickiness_probe?.enabled ? `启用 · ${report?.task?.config?.stickiness_probe?.sessid_count} sessid · 时间表 ${(report?.task?.config?.stickiness_probe?.poll_schedule_seconds||[]).join(',')}s` : '关闭'"></code></div>
+      </div>
+    </section>
+
+    <div class="kpi-grid">
+      <div class="kpi"><label>状态</label><span class="badge" :class="'st-'+report?.task?.state" x-text="report?.task?.state"></span></div>
+      <div class="kpi"><label>测试时长</label><span x-text="formatDuration(report?.task?.elapsed_seconds)"></span></div>
+      <div class="kpi big"><label>独立 IP 数</label><span x-text="report?.task?.unique_ips?.toLocaleString()"></span></div>
+      <div class="kpi warn"><label>全局重复度</label><span x-text="((report?.dup_rate||0)*100).toFixed(2)+'%'"></span>
+        <small>(成功-独立)/成功</small>
+      </div>
+      <div class="kpi"><label>平均每IP出现</label><span x-text="(report?.avg_per_ip||0).toFixed(2)+' 次'"></span></div>
+      <div class="kpi"><label>最高重复 IP</label><span x-text="(report?.max_dup_count||0)+' 次'"></span></div>
+      <div class="kpi"><label>总请求</label><span x-text="report?.task?.total_requests?.toLocaleString()"></span></div>
+      <div class="kpi success"><label>成功</label><span x-text="report?.task?.total_success?.toLocaleString()"></span></div>
+      <div class="kpi danger"><label>失败 / 失败率</label><span x-text="`${report?.task?.total_failed} (${failureRate(report?.task)})`"></span></div>
+      <div class="kpi"><label>覆盖国家</label><span x-text="report?.task?.unique_countries"></span></div>
+      <div class="kpi"><label>平均延迟</label><span x-text="formatLatencyMs(report?.avg_latency)"></span></div>
+      <div class="kpi"><label>P95 / P99</label><span x-text="`${formatLatencyMs(report?.p95_latency)} / ${formatLatencyMs(report?.p99_latency)}`"></span></div>
+      <div class="kpi"><label>开始</label><span class="small" x-text="formatTime(report?.task?.started_at)"></span></div>
+      <div class="kpi"><label>结束</label><span class="small" x-text="formatTime(report?.task?.finished_at)"></span></div>
+    </div>
+
+    <section class="card">
+      <h3><i data-lucide="trending-up"></i> 独立 IP / 重复度 / QPS 时间线</h3>
+      <canvas id="chart-ts" height="100"></canvas>
+    </section>
+
+    <div class="grid2">
+      <section class="card">
+        <h3><i data-lucide="map-pin"></i> 国家分布 (按独立 IP)</h3>
+        <canvas id="chart-country" height="200"></canvas>
+        <details><summary>明细表</summary>
+          <table class="mini">
+            <thead><tr><th>国家</th><th>独立 IP</th><th>占比</th></tr></thead>
+            <tbody>
+              <template x-for="c in report?.countries||[]" :key="c.country">
+                <tr><td x-text="c.country"></td><td x-text="c.count"></td><td x-text="((c.count/(report?.task?.unique_ips||1))*100).toFixed(1)+'%'"></td></tr>
+              </template>
+            </tbody>
+          </table>
+        </details>
+      </section>
+
+      <section class="card">
+        <h3><i data-lucide="alert-triangle"></i> 错误分类</h3>
+        <canvas id="chart-error" height="200"></canvas>
+        <table class="mini" x-show="(report?.errors||[]).length">
+          <thead><tr><th>类型</th><th>次数</th></tr></thead>
+          <tbody>
+            <template x-for="e in report?.errors||[]" :key="e.kind">
+              <tr><td x-text="e.kind"></td><td x-text="e.count"></td></tr>
+            </template>
+          </tbody>
+        </table>
+      </section>
+    </div>
+
+    <section class="card" x-show="(report?.probe_sessions||[]).length">
+      <h3><i data-lucide="anchor"></i> 粘性分析</h3>
+      <div class="kpi-row">
+        <div class="kpi"><label>跟踪 sessid 数</label><span x-text="(report?.probe_sessions||[]).length"></span></div>
+        <div class="kpi"><label>≥3 分钟保持</label><span x-text="pctOf(report?.stickiness_ge3min, (report?.probe_sessions||[]).length)"></span></div>
+        <div class="kpi"><label>≥10 分钟保持</label><span x-text="pctOf(report?.stickiness_ge10min, (report?.probe_sessions||[]).length)"></span></div>
+      </div>
+      <canvas id="chart-stick" height="120"></canvas>
+      <details>
+        <summary>每个 sessid 详情</summary>
+        <table class="mini scroll">
+          <thead><tr><th>sessid</th><th>首次 IP</th><th>当前 IP</th><th>切换</th><th>请求次数</th><th>最长保持(秒)</th></tr></thead>
+          <tbody>
+            <template x-for="p in report?.probe_sessions||[]" :key="p.sessid">
+              <tr>
+                <td x-text="p.sessid"></td>
+                <td x-text="p.first_ip"></td>
+                <td x-text="p.current_ip"></td>
+                <td x-text="p.ip_changes"></td>
+                <td x-text="p.poll_count"></td>
+                <td x-text="p.longest_hold_seconds"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </details>
+    </section>
+
+    <section class="card" x-show="(report?.top_ips||[]).length">
+      <h3><i data-lucide="flame"></i> 重复出现最多的 IP (TOP 50)</h3>
+      <table class="mini scroll">
+        <thead><tr><th>#</th><th>IP</th><th>出现次数</th></tr></thead>
+        <tbody>
+          <template x-for="(ip,i) in report?.top_ips||[]" :key="ip.ip">
+            <tr><td x-text="i+1"></td><td x-text="ip.ip"></td><td x-text="ip.count"></td></tr>
+          </template>
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+
+  <div class="toast" x-show="toast" x-text="toast"></div>
+
+  <div class="modal-mask" x-show="showSystem" @click.self="showSystem=false" x-cloak>
+    <div class="modal">
+      <h3><i data-lucide="activity"></i> 服务器状态</h3>
+      <div class="kpi-grid" x-show="sysInfo">
+        <div class="kpi"><label>Goroutines</label><span x-text="sysInfo?.goroutines"></span></div>
+        <div class="kpi"><label>Open FDs</label><span x-text="sysInfo?.open_fds"></span></div>
+        <div class="kpi"><label>Heap Alloc</label><span x-text="(sysInfo?.heap_alloc_mb||0)+' MB'"></span></div>
+        <div class="kpi"><label>Heap Sys</label><span x-text="(sysInfo?.heap_sys_mb||0)+' MB'"></span></div>
+        <div class="kpi"><label>Total Sys</label><span x-text="(sysInfo?.sys_mb||0)+' MB'"></span></div>
+        <div class="kpi"><label>GC 次数</label><span x-text="sysInfo?.gc_runs"></span></div>
+        <div class="kpi"><label>CPU 核数</label><span x-text="sysInfo?.num_cpu"></span></div>
+        <div class="kpi"><label>Load 1m</label><span x-text="(sysInfo?.load_avg?.[0]||0).toFixed(2)"></span></div>
+        <div class="kpi"><label>Load 5m</label><span x-text="(sysInfo?.load_avg?.[1]||0).toFixed(2)"></span></div>
+        <div class="kpi"><label>Load 15m</label><span x-text="(sysInfo?.load_avg?.[2]||0).toFixed(2)"></span></div>
+        <div class="kpi"><label>Go 版本</label><span class="small" x-text="sysInfo?.go_version"></span></div>
+      </div>
+      <div class="form-action">
+        <button class="btn" @click="loadSystem()"><i data-lucide="refresh-cw"></i> 刷新</button>
+        <button class="btn" @click="showSystem=false"><i data-lucide="x"></i> 关闭</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="ui/app.js?v=10"></script>
+</body>
+</html>
