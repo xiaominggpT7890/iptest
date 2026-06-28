@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-06-26 v0.2.1 — 修复 batch_writer FK 死锁 + checkpoint 加强
+
+### 背景
+线上服务运行 2 天后，batch_writer 出现大量 `FOREIGN KEY constraint failed (787)` 错误（任务已被删除但样本仍卡在 channel），导致：
+- 内存从 77MB 涨到 769MB（channel 积压 100000 样本）
+- WAL 膨胀到 246MB（PASSIVE checkpoint 不够积极）
+- 新写入全面阻塞
+
+### 改动
+- `internal/store/db.go`：
+  - `doFlush()`：检测 FOREIGN KEY 错误，自动标记 broken 并丢弃积压样本（不再无限重试）
+  - `Submit()`：broken 后直接丢弃，不阻塞 runner goroutine
+  - `checkpointLoop`：PASSIVE → TRUNCATE，确保 WAL 及时回收
+  - `NewBatchWriter` 加 `taskID` 参数用于日志
+- `internal/task/manager.go`：传递 taskID 给 `NewBatchWriter`
+
+### 影响范围
+- 被删除任务的样本不再撑爆内存，channel 自动清空
+- WAL 每 2 分钟 TRUNCATE，不再膨胀到数百 MB
+- 日志清晰提示 `task deleted, discarding` 便于排查
+
+### 验证
+- 线上已重启，内存 124MB，WAL 37KB，无 FK 错误
+- 编译通过
+
+---
+
 ## 2026-06-23 v0.2.0 — 全面性能优化：错误分类重写、相态超时、内存聚合报表、系统状态面板
 
 ### 背景

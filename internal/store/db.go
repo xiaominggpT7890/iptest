@@ -61,7 +61,7 @@ func (d *DB) checkpointLoop() {
 	ticker := time.NewTicker(2 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		_, _ = d.Exec(`PRAGMA wal_checkpoint(PASSIVE);`)
+		_, _ = d.Exec(`PRAGMA wal_checkpoint(TRUNCATE);`)
 	}
 }
 
@@ -73,9 +73,12 @@ type BatchWriter struct {
 	stop     chan struct{}
 	flushDur time.Duration
 	batchMax int
+	taskID   int64
+	broken   bool
+	brokenMu sync.Mutex
 }
 
-func NewBatchWriter(db *DB, buf int) *BatchWriter {
+func NewBatchWriter(db *DB, buf int, taskID int64) *BatchWriter {
 	if buf <= 0 {
 		buf = 100000
 	}
@@ -85,15 +88,29 @@ func NewBatchWriter(db *DB, buf int) *BatchWriter {
 		stop:     make(chan struct{}),
 		flushDur: 200 * time.Millisecond,
 		batchMax: 1000,
+		taskID:   taskID,
 	}
 	bw.wg.Add(1)
 	go bw.loop()
 	return bw
 }
 
-// Submit 非阻塞提交一个样本; 满了会阻塞
+// Submit 非阻塞提交一个样本; 满了会阻塞;
+// 如果 writer 已 broken（任务被删除），直接丢弃
 func (b *BatchWriter) Submit(s Sample) {
+	b.brokenMu.Lock()
+	broken := b.broken
+	b.brokenMu.Unlock()
+	if broken {
+		return
+	}
 	b.ch <- s
+}
+
+func (b *BatchWriter) setBroken() {
+	b.brokenMu.Lock()
+	b.broken = true
+	b.brokenMu.Unlock()
 }
 
 func (b *BatchWriter) Close() {
@@ -109,40 +126,53 @@ func (b *BatchWriter) loop() {
 	for {
 		select {
 		case <-b.stop:
-			// drain
-			for {
-				select {
-				case s := <-b.ch:
-					batch = append(batch, s)
-					if len(batch) >= b.batchMax {
-						b.flush(batch)
-						batch = batch[:0]
-					}
-				default:
-					if len(batch) > 0 {
-						b.flush(batch)
-					}
-					return
-				}
-			}
+			b.drain(batch)
+			return
 		case s := <-b.ch:
 			batch = append(batch, s)
 			if len(batch) >= b.batchMax {
-				b.flush(batch)
-				batch = batch[:0]
+				if b.doFlush(batch) {
+					batch = batch[:0]
+				} else {
+					batch = nil
+				}
 			}
 		case <-ticker.C:
 			if len(batch) > 0 {
-				b.flush(batch)
-				batch = batch[:0]
+				if b.doFlush(batch) {
+					batch = batch[:0]
+				} else {
+					batch = nil
+				}
 			}
 		}
 	}
 }
 
-func (b *BatchWriter) flush(batch []Sample) {
+func (b *BatchWriter) drain(batch []Sample) {
+	for {
+		select {
+		case s := <-b.ch:
+			batch = append(batch, s)
+			if len(batch) >= b.batchMax {
+				if !b.doFlush(batch) {
+					b.setBroken()
+				}
+				batch = batch[:0]
+			}
+		default:
+			if len(batch) > 0 {
+				b.doFlush(batch)
+			}
+			return
+		}
+	}
+}
+
+// doFlush 写入一批样本, 返回 true 表示成功, false 表示 FK 约束失败(任务已删除)
+func (b *BatchWriter) doFlush(batch []Sample) bool {
 	if len(batch) == 0 {
-		return
+		return true
 	}
 	// 用单条 multi-VALUES insert,效率最高
 	var sb strings.Builder
@@ -166,9 +196,14 @@ func (b *BatchWriter) flush(batch []Sample) {
 		)
 	}
 	if _, err := b.db.Exec(sb.String(), args...); err != nil {
-		// 静默打印, 不阻塞 worker
+		if strings.Contains(err.Error(), "FOREIGN KEY") {
+			fmt.Printf("[batch_writer] task=%d flushed %d samples FAILED (task deleted), discarding %d\n", b.taskID, len(batch), len(batch))
+			b.setBroken()
+			return false
+		}
 		fmt.Printf("[batch_writer] flush %d failed: %v\n", len(batch), err)
 	}
+	return true
 }
 
 func nullIfEmpty(s string) interface{} {

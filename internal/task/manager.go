@@ -98,7 +98,7 @@ func (m *Manager) Start(taskID int64) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
-	writer := store.NewBatchWriter(m.db, 100000)
+	writer := store.NewBatchWriter(m.db, 100000, taskID)
 	winSize := cfg.PoolSweep.HitRateWindowSize
 	if winSize <= 0 {
 		winSize = 1000
