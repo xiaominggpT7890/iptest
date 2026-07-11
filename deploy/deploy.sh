@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# iptest 部署脚本 (Mac → 远端 root@45.33.102.108)
+# iptest 部署脚本 (Mac → 远端 root@47.84.225.130)
 # 用法:
 #   ./deploy/deploy.sh             # 编译 + 上传 + 重启
 #   ./deploy/deploy.sh restart     # 只重启远端服务

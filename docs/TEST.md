@@ -127,7 +127,7 @@ curl -s -X DELETE https://admin.dearka.cc/iptest/api/tasks/$TASK_ID
 ✅ curl /                                     → HTTP 200 (UI)
 ```
 
-### 测试 2：远端部署（45.33.102.108 / Ubuntu）
+### 测试 2：远端部署（47.84.225.130 / Ubuntu）
 
 ```
 ✅ 交叉编译 24MB 二进制
