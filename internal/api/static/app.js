@@ -2,6 +2,11 @@ function iptestApp() {
   return {
     view: 'list',
     tasks: [],
+    tasksRequestID: 0,
+    tasksLoading: false,
+    reportRequestID: 0,
+    reportLoading: false,
+    pendingActions: {},
     toast: '',
     pollHandle: null,
     reportTimer: null,
@@ -42,12 +47,19 @@ function iptestApp() {
     },
 
     async loadTasks(silent = false) {
+      if (silent && this.tasksLoading) return;
+      const requestID = ++this.tasksRequestID;
+      this.tasksLoading = true;
       try {
         const res = await fetch('api/tasks');
         const data = await res.json();
+        if (requestID !== this.tasksRequestID) return;
+        if (!res.ok || !Array.isArray(data)) throw new Error(data.error || '任务列表响应异常');
         this.tasks = data;
       } catch (e) {
-        if (!silent) this.notify('加载失败: ' + e.message);
+        if (!silent && requestID === this.tasksRequestID) this.notify('加载失败: ' + e.message);
+      } finally {
+        if (requestID === this.tasksRequestID) this.tasksLoading = false;
       }
     },
 
@@ -117,6 +129,18 @@ function iptestApp() {
       return new Date(ms).toLocaleString('zh-CN', { hour12: false });
     },
 
+    sessidModeLabel(mode) {
+      return mode === 'sequential' ? '递增循环' : '随机';
+    },
+
+    nextSessidLabel(task) {
+      if (task?.config?.sessid_range?.mode !== 'sequential') return '-';
+      const range = task.config.sessid_range;
+      let next = task.sweep_next_sessid ?? range.min;
+      if (next < range.min || next > range.max) next = range.min;
+      return Number(next).toLocaleString();
+    },
+
     async createTask(autoStart = false) {
       const sched = this.probeScheduleStr
         .split(/[,\s]+/)
@@ -160,8 +184,13 @@ function iptestApp() {
         }
         this.notify('✅ 已创建任务 #' + data.id);
         if (autoStart) {
-          await fetch(`api/tasks/${data.id}/start`, { method: 'POST' });
-          this.notify('🚀 已开始任务 #' + data.id);
+          const startRes = await fetch(`api/tasks/${data.id}/start`, { method: 'POST' });
+          const started = await startRes.json();
+          if (!startRes.ok || !started.ok || started.error) {
+            this.notify(`任务 #${data.id} 已创建，启动失败: ` + (started.error || startRes.status));
+          } else {
+            this.notify('🚀 已开始任务 #' + data.id);
+          }
         }
         await this.loadTasks();
         this.view = 'list';
@@ -173,6 +202,7 @@ function iptestApp() {
 
     toConfig() {
       const f = this.form;
+      f.proxy.template = normalizeProxyTemplate(f.proxy.template);
       return {
         proxy: {
           scheme: f.proxy.scheme || 'socks5',
@@ -198,17 +228,21 @@ function iptestApp() {
     },
 
     async act(id, action) {
+      if (this.pendingActions[id]) return;
+      this.pendingActions[id] = true;
       try {
         const res = await fetch(`api/tasks/${id}/${action}`, { method: 'POST' });
         const data = await res.json();
-        if (data.error) {
-          this.notify(data.error);
+        if (!res.ok || !data.ok || data.error) {
+          this.notify(data.error || `操作失败 (${res.status})`);
         } else {
           this.notify(`✅ ${action}`);
           await this.loadTasks();
         }
       } catch (e) {
         this.notify('失败: ' + e.message);
+      } finally {
+        delete this.pendingActions[id];
       }
     },
 
@@ -241,7 +275,7 @@ function iptestApp() {
         f.target_url = cfg.target_url || f.target_url;
         f.proxy.scheme = cfg.proxy?.scheme || 'socks5';
         f.proxy.template = cfg.proxy?.template || '';
-        f.sessid_range = cfg.sessid_range || f.sessid_range;
+        f.sessid_range = { ...f.sessid_range, ...(cfg.sessid_range || {}) };
         f.duration_seconds = cfg.duration_seconds ?? f.duration_seconds;
         f.concurrency = cfg.concurrency ?? f.concurrency;
         f.request_timeout_ms = cfg.request_timeout_ms ?? f.request_timeout_ms;
@@ -291,7 +325,7 @@ function iptestApp() {
         f.target_url = cfg.target_url || f.target_url;
         f.proxy.scheme = cfg.proxy?.scheme || 'socks5';
         f.proxy.template = cfg.proxy?.template || '';
-        f.sessid_range = cfg.sessid_range || f.sessid_range;
+        f.sessid_range = { ...f.sessid_range, ...(cfg.sessid_range || {}) };
         f.duration_seconds = cfg.duration_seconds ?? f.duration_seconds;
         f.concurrency = cfg.concurrency ?? f.concurrency;
         f.request_timeout_ms = cfg.request_timeout_ms ?? f.request_timeout_ms;
@@ -307,6 +341,7 @@ function iptestApp() {
     },
 
     async openReport(id) {
+      this.stopReportAutoRefresh();
       this.view = 'report';
       this.currentReportID = id;
       const t = this.tasks.find(x => x.id === id);
@@ -320,7 +355,7 @@ function iptestApp() {
         };
       }
       await this.loadReport(id);
-      this.startReportAutoRefresh();
+      if (this.view === 'report' && this.currentReportID === id) this.startReportAutoRefresh();
     },
 
     startReportAutoRefresh() {
@@ -331,7 +366,7 @@ function iptestApp() {
           return;
         }
         const t = this.tasks.find(x => x.id === this.currentReportID);
-        if (t && (t.state === 'running' || t.state === 'paused')) {
+        if (t && (t.state === 'running' || this.report?.task?.state === 'running')) {
           this.loadReport(this.currentReportID, true);
         }
       }, 3000);
@@ -345,15 +380,31 @@ function iptestApp() {
     },
 
     async loadReport(id, silent = false) {
+      if (silent && this.reportLoading) return;
+      const requestID = ++this.reportRequestID;
+      this.reportLoading = true;
+      const isCurrent = () => requestID === this.reportRequestID
+        && this.view === 'report' && this.currentReportID === id;
       try {
         const t0 = Date.now();
         if (!silent) this.notify('报表加载中...');
         const [report, metrics] = await Promise.all([
-          fetch(`api/tasks/${id}/report`).then(r => r.json()),
-          fetch(`api/tasks/${id}/metrics`).then(r => r.json()),
+          fetch(`api/tasks/${id}/report`).then(async r => {
+            const data = await r.json();
+            if (!r.ok || data.error) throw new Error(data.error || `报表请求失败 (${r.status})`);
+            return data;
+          }),
+          fetch(`api/tasks/${id}/metrics`).then(async r => {
+            const data = await r.json();
+            if (!r.ok || !Array.isArray(data)) throw new Error(data.error || '指标响应异常');
+            return data;
+          }),
         ]);
+        if (!isCurrent()) return;
+        if (report.task?.id !== id) throw new Error('报表任务不匹配');
         this.report = { ...report, _loading: false };
         this.$nextTick(() => {
+          if (!isCurrent()) return;
           this.drawCharts(metrics);
           this.refreshIcons();
         });
@@ -362,7 +413,9 @@ function iptestApp() {
           this.notify(`✅ 报表加载完成 (${dt}s)`);
         }
       } catch (e) {
-        if (!silent) this.notify('加载报表失败: ' + e.message);
+        if (!silent && isCurrent()) this.notify('加载报表失败: ' + e.message);
+      } finally {
+        if (requestID === this.reportRequestID) this.reportLoading = false;
       }
     },
 
@@ -468,7 +521,7 @@ function defaultForm() {
       scheme: 'socks5',
       template: 'user-zphdrj4g-region-us-sessid-{num}-sesstime-600:U9NR5Dr4@gate3.abcsocks.cloud:9102',
     },
-    sessid_range: { min: 1000000, max: 9000000 },
+    sessid_range: { min: 1000000, max: 9000000, mode: 'random' },
     duration_seconds: 1800,
     concurrency: 500,
     request_timeout_ms: 15000,
@@ -484,6 +537,15 @@ function defaultForm() {
       loop_schedule: true,
     },
   };
+}
+
+function normalizeProxyTemplate(template) {
+  const s = template.trim();
+  const at = s.lastIndexOf('@');
+  if (at < 0) return s;
+  const colon = s.lastIndexOf(':');
+  if (colon < at) return s.slice(0, at + 1) + s.slice(at + 1).trim();
+  return s.slice(0, at + 1) + s.slice(at + 1, colon).trim() + ':' + s.slice(colon + 1).trim();
 }
 
 function chartColors(n) {

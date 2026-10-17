@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>iptest — SOCKS5 IP 池测试</title>
 <base href="./">
-<link rel="stylesheet" href="ui/style.css?v=10">
+<link rel="stylesheet" href="ui/style.css?v=13">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%232563eb'><circle cx='12' cy='12' r='10'/></svg>">
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
@@ -64,10 +64,10 @@
             <td x-text="liveQps(t)"></td>
             <td x-text="formatLatencyForRow(t)"></td>
             <td class="actions">
-              <button x-show="t.state==='created' || t.state==='paused' || t.state==='completed' || t.state==='stopped' || t.state==='failed'" @click="act(t.id,'start')" title="开始 / 继续">
+              <button x-show="t.state==='created' || t.state==='paused' || t.state==='completed' || t.state==='stopped' || t.state==='failed'" :disabled="!!pendingActions[t.id]" @click="act(t.id,'start')" title="开始 / 继续">
                 <i data-lucide="play"></i>
               </button>
-              <button x-show="t.state==='running'" @click="act(t.id,'pause')" title="暂停">
+              <button x-show="t.state==='running'" :disabled="!!pendingActions[t.id]" @click="act(t.id,'pause')" title="暂停">
                 <i data-lucide="pause"></i>
               </button>
               <button @click="openReport(t.id)" title="报表">
@@ -138,10 +138,18 @@
 
       <fieldset>
         <legend><i data-lucide="hash"></i> sessid 范围</legend>
+        <label for="sessid-mode">取号模式
+          <select id="sessid-mode" x-model="form.sessid_range.mode" aria-describedby="sessid-mode-help">
+            <option value="random">随机（默认）</option>
+            <option value="sequential">递增循环</option>
+          </select>
+        </label>
         <div class="row">
-          <label class="col">最小 <input type="number" x-model.number="form.sessid_range.min"></label>
-          <label class="col">最大 <input type="number" x-model.number="form.sessid_range.max"></label>
+          <label class="col">最小 <input type="number" min="0" step="1" x-model.number="form.sessid_range.min"></label>
+          <label class="col">最大 <input type="number" min="0" step="1" x-model.number="form.sessid_range.max"></label>
         </div>
+        <span id="sessid-mode-help" class="hint" x-text="form.sessid_range.mode === 'sequential' ? '从最小值递增到最大值后回到最小值循环；暂停后接着取。' : '每次在范围内随机取号，可能重复选中同一个 sessid。'"></span>
+        <span class="hint">取号模式用于池子探测；粘性探针保持固定 sessid，按时间表重复查询。</span>
       </fieldset>
 
       <fieldset>
@@ -215,6 +223,8 @@
         <div><label>协议</label><code x-text="report?.task?.config?.proxy?.scheme || 'socks5'"></code></div>
         <div><label>并发</label><code x-text="report?.task?.config?.concurrency"></code></div>
         <div><label>sessid 范围</label><code x-text="`${report?.task?.config?.sessid_range?.min?.toLocaleString()} ~ ${report?.task?.config?.sessid_range?.max?.toLocaleString()}`"></code></div>
+        <div><label>取号模式</label><code x-text="sessidModeLabel(report?.task?.config?.sessid_range?.mode)"></code></div>
+        <div x-show="report?.task?.config?.sessid_range?.mode === 'sequential' && report?.task?.config?.pool_sweep?.enabled"><label>下一 sessid</label><code x-text="nextSessidLabel(report?.task)"></code></div>
         <div><label>计划时长</label><code x-text="formatDuration(report?.task?.config?.duration_seconds)"></code></div>
         <div><label>请求超时</label><code x-text="(report?.task?.config?.request_timeout_ms||0)+' ms'"></code></div>
         <div class="full"><label>PoolSweep</label><code x-text="report?.task?.config?.pool_sweep?.enabled ? `启用 (窗口=${report?.task?.config?.pool_sweep?.hit_rate_window_size})` : '关闭'"></code></div>
@@ -344,6 +354,6 @@
   </div>
 </div>
 
-<script src="ui/app.js?v=10"></script>
+<script src="ui/app.js?v=13"></script>
 </body>
 </html>

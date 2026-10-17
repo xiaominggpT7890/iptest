@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -27,11 +28,14 @@ type Runner struct {
 
 	// 探池停止标志
 	stopHitRate float64
+	sweep       *sweepCursor
+	errMu       sync.Mutex
+	err         error
 }
 
 func NewRunner(parent context.Context, taskID int64, cfg *config.TaskConfig, db *store.DB, writer *store.BatchWriter, agg *metrics.Aggregator) *Runner {
 	ctx, cancel := context.WithCancel(parent)
-	return &Runner{
+	r := &Runner{
 		TaskID:      taskID,
 		Cfg:         cfg,
 		DB:          db,
@@ -41,6 +45,41 @@ func NewRunner(parent context.Context, taskID int64, cfg *config.TaskConfig, db 
 		cancel:      cancel,
 		stopHitRate: cfg.PoolSweep.StopWhenHitRateGE,
 	}
+	if cfg.PoolSweep.Enabled && cfg.Sessid.Mode == config.SessidSequential {
+		r.sweep = &sweepCursor{db: db, taskID: taskID, minimum: cfg.Sessid.Min, maximum: cfg.Sessid.Max}
+	}
+	return r
+}
+
+// CurrentSweepNext 返回实时待领取号码，不包含预留但尚未领取的号码。
+func (r *Runner) CurrentSweepNext() *int64 {
+	if r.sweep == nil {
+		return nil
+	}
+	return r.sweep.current()
+}
+
+// SaveSweepCursor 在所有 worker 结束后保存精确游标。
+func (r *Runner) SaveSweepCursor(ctx context.Context) error {
+	if r.sweep == nil {
+		return nil
+	}
+	return r.sweep.save(ctx)
+}
+
+func (r *Runner) Err() error {
+	r.errMu.Lock()
+	defer r.errMu.Unlock()
+	return r.err
+}
+
+func (r *Runner) fail(err error) {
+	r.errMu.Lock()
+	if r.err == nil {
+		r.err = err
+	}
+	r.errMu.Unlock()
+	r.cancel()
 }
 
 func (r *Runner) Stop() {
@@ -115,7 +154,19 @@ func (r *Runner) startPoolSweeper() {
 				if r.ctx.Err() != nil {
 					return
 				}
-				sessid := minSess + rng.Int63n(maxSess-minSess+1)
+				var sessid int64
+				if r.sweep != nil {
+					var err error
+					sessid, err = r.sweep.take(r.ctx)
+					if err != nil {
+						if r.ctx.Err() == nil {
+							r.fail(fmt.Errorf("reserve sweep sessid: %w", err))
+						}
+						return
+					}
+				} else {
+					sessid = minSess + rng.Int63n(maxSess-minSess+1)
+				}
 				r.fireOnce(builder, sessid, "sweep")
 			}
 		}(i)
@@ -138,13 +189,13 @@ func (r *Runner) startStickinessProbe() {
 	minS, maxS := r.Cfg.Sessid.Min, r.Cfg.Sessid.Max
 	picked := make([]int64, 0, count)
 	used := make(map[int64]struct{}, count)
-	for len(picked) < count {
-		s := minS + rng.Int63n(maxS-minS+1)
+	for j := maxS - minS + 1 - int64(count); j < maxS-minS+1; j++ {
+		s := rng.Int63n(j + 1)
 		if _, ok := used[s]; ok {
-			continue
+			s = j
 		}
 		used[s] = struct{}{}
-		picked = append(picked, s)
+		picked = append(picked, minS+s)
 	}
 	schedule := r.Cfg.StickinessProbe.PollScheduleSeconds
 	loop := r.Cfg.StickinessProbe.LoopSchedule
@@ -194,7 +245,7 @@ func (r *Runner) fireOnce(builder *proxy.Builder, sessid int64, workerType strin
 	now := time.Now().UnixMilli()
 	if ferr != nil {
 		r.Agg.ObserveFailure(ferr.Kind, latency)
-		r.Writer.Submit(store.Sample{
+		r.submitSample(store.Sample{
 			TaskID:     r.TaskID,
 			WorkerType: workerType,
 			Sessid:     sessid,
@@ -207,7 +258,7 @@ func (r *Runner) fireOnce(builder *proxy.Builder, sessid int64, workerType strin
 		return
 	}
 	r.Agg.ObserveSuccess(geo.IP, geo.Country, latency)
-	r.Writer.Submit(store.Sample{
+	r.submitSample(store.Sample{
 		TaskID:     r.TaskID,
 		WorkerType: workerType,
 		Sessid:     sessid,
@@ -220,14 +271,16 @@ func (r *Runner) fireOnce(builder *proxy.Builder, sessid int64, workerType strin
 		TS:         now,
 	})
 	if workerType == "probe" {
-		_, _ = r.DB.UpsertProbeSession(context.Background(), r.TaskID, sessid, geo.IP, now)
+		probeCtx, cancelProbe := context.WithTimeout(context.Background(), 5*time.Second)
+		_, _ = r.DB.UpsertProbeSession(probeCtx, r.TaskID, sessid, geo.IP, now)
+		cancelProbe()
 	}
 }
 
 func (r *Runner) recordFailure(sessid int64, workerType string, startTS time.Time, kind, msg string) {
 	latency := time.Since(startTS).Milliseconds()
 	r.Agg.ObserveFailure(kind, latency)
-	r.Writer.Submit(store.Sample{
+	r.submitSample(store.Sample{
 		TaskID:     r.TaskID,
 		WorkerType: workerType,
 		Sessid:     sessid,
@@ -237,4 +290,10 @@ func (r *Runner) recordFailure(sessid int64, workerType string, startTS time.Tim
 		ErrMsg:     msg,
 		TS:         time.Now().UnixMilli(),
 	})
+}
+
+func (r *Runner) submitSample(sample store.Sample) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r.Writer.SubmitContext(ctx, sample)
 }

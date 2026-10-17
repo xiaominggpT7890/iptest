@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -36,6 +37,12 @@ func main() {
 	defer db.Close()
 
 	mgr := task.NewManager(db)
+	recoveryCtx, cancelRecovery := context.WithTimeout(context.Background(), 30*time.Second)
+	err = mgr.ReconcileRunning(recoveryCtx)
+	cancelRecovery()
+	if err != nil {
+		log.Fatalf("recover interrupted tasks: %v", err)
+	}
 	srv := api.NewServer(db, mgr)
 
 	httpSrv := &http.Server{

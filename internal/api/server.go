@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -84,6 +85,9 @@ func (s *Server) listTasks(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(rows))
 	for _, r := range rows {
+		if next := s.mgr.CurrentSweepNext(r.ID); next != nil {
+			r.SweepNextSessid = sql.NullInt64{Int64: *next, Valid: true}
+		}
 		rowJSON, _ := json.Marshal(r)
 		var m map[string]interface{}
 		_ = json.Unmarshal(rowJSON, &m)
@@ -137,6 +141,9 @@ func (s *Server) getTask(c *gin.Context) {
 	if row == nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
+	}
+	if next := s.mgr.CurrentSweepNext(id); next != nil {
+		row.SweepNextSessid = sql.NullInt64{Int64: *next, Valid: true}
 	}
 	c.JSON(200, row)
 }
@@ -428,6 +435,9 @@ func parseID(c *gin.Context) int64 {
 }
 
 func (s *Server) fastReport(row *store.TaskRow, d *metrics.DetailedSnapshot) gin.H {
+	if next := s.mgr.CurrentSweepNext(row.ID); next != nil {
+		row.SweepNextSessid = sql.NullInt64{Int64: *next, Valid: true}
+	}
 	ctx := context.Background()
 	hist, ge3, ge10, _ := s.db.StickinessHistogram(ctx, row.ID)
 	probes, _ := s.db.ListProbeSessions(ctx, row.ID)
@@ -473,16 +483,16 @@ func (s *Server) systemStatus(c *gin.Context) {
 	la, _ := readLoadAvg()
 	fd := countOpenFDs()
 	c.JSON(200, gin.H{
-		"goroutines":      runtime.NumGoroutine(),
-		"num_cpu":         runtime.NumCPU(),
-		"go_version":      runtime.Version(),
-		"heap_alloc_mb":   ms.HeapAlloc / 1024 / 1024,
-		"heap_sys_mb":     ms.HeapSys / 1024 / 1024,
-		"sys_mb":          ms.Sys / 1024 / 1024,
-		"gc_runs":         ms.NumGC,
-		"load_avg":        la,
-		"open_fds":        fd,
-		"ts":              time.Now().UnixMilli(),
+		"goroutines":    runtime.NumGoroutine(),
+		"num_cpu":       runtime.NumCPU(),
+		"go_version":    runtime.Version(),
+		"heap_alloc_mb": ms.HeapAlloc / 1024 / 1024,
+		"heap_sys_mb":   ms.HeapSys / 1024 / 1024,
+		"sys_mb":        ms.Sys / 1024 / 1024,
+		"gc_runs":       ms.NumGC,
+		"load_avg":      la,
+		"open_fds":      fd,
+		"ts":            time.Now().UnixMilli(),
 	})
 }
 

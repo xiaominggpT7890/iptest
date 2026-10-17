@@ -37,22 +37,25 @@ type TaskRow struct {
 	UniqueIPs       int64           `json:"unique_ips"`
 	UniqueCountries int64           `json:"unique_countries"`
 	LastError       sql.NullString  `json:"-"`
+	SweepNextSessid sql.NullInt64   `json:"-"`
 }
 
 func (t TaskRow) MarshalJSON() ([]byte, error) {
 	type Alias TaskRow
 	return json.Marshal(struct {
 		Alias
-		StartedAt  *int64  `json:"started_at,omitempty"`
-		PausedAt   *int64  `json:"paused_at,omitempty"`
-		FinishedAt *int64  `json:"finished_at,omitempty"`
-		LastError  string  `json:"last_error,omitempty"`
+		StartedAt       *int64 `json:"started_at,omitempty"`
+		PausedAt        *int64 `json:"paused_at,omitempty"`
+		FinishedAt      *int64 `json:"finished_at,omitempty"`
+		LastError       string `json:"last_error,omitempty"`
+		SweepNextSessid *int64 `json:"sweep_next_sessid"`
 	}{
-		Alias:      Alias(t),
-		StartedAt:  nullInt64Ptr(t.StartedAt),
-		PausedAt:   nullInt64Ptr(t.PausedAt),
-		FinishedAt: nullInt64Ptr(t.FinishedAt),
-		LastError:  t.LastError.String,
+		Alias:           Alias(t),
+		StartedAt:       nullInt64Ptr(t.StartedAt),
+		PausedAt:        nullInt64Ptr(t.PausedAt),
+		FinishedAt:      nullInt64Ptr(t.FinishedAt),
+		LastError:       t.LastError.String,
+		SweepNextSessid: nullInt64Ptr(t.SweepNextSessid),
 	})
 }
 
@@ -65,7 +68,7 @@ func nullInt64Ptr(n sql.NullInt64) *int64 {
 }
 
 func (db *DB) CreateTask(ctx context.Context, name string, configJSON []byte) (int64, error) {
-	res, err := db.ExecContext(ctx,
+	res, err := db.execWriteContext(ctx,
 		`INSERT INTO tasks (name, config_json, state, created_at) VALUES (?, ?, 'created', ?)`,
 		name, string(configJSON), time.Now().UnixMilli())
 	if err != nil {
@@ -75,10 +78,10 @@ func (db *DB) CreateTask(ctx context.Context, name string, configJSON []byte) (i
 }
 
 func (db *DB) GetTask(ctx context.Context, id int64) (*TaskRow, error) {
-	row := db.QueryRowContext(ctx, `SELECT id, name, config_json, state, created_at, started_at, paused_at, finished_at, elapsed_seconds, total_requests, total_success, total_failed, unique_ips, unique_countries, last_error FROM tasks WHERE id=?`, id)
+	row := db.QueryRowContext(ctx, `SELECT id, name, config_json, state, created_at, started_at, paused_at, finished_at, elapsed_seconds, total_requests, total_success, total_failed, unique_ips, unique_countries, last_error, sweep_next_sessid FROM tasks WHERE id=?`, id)
 	t := &TaskRow{}
 	var cfg string
-	if err := row.Scan(&t.ID, &t.Name, &cfg, &t.State, &t.CreatedAt, &t.StartedAt, &t.PausedAt, &t.FinishedAt, &t.ElapsedSeconds, &t.TotalRequests, &t.TotalSuccess, &t.TotalFailed, &t.UniqueIPs, &t.UniqueCountries, &t.LastError); err != nil {
+	if err := row.Scan(&t.ID, &t.Name, &cfg, &t.State, &t.CreatedAt, &t.StartedAt, &t.PausedAt, &t.FinishedAt, &t.ElapsedSeconds, &t.TotalRequests, &t.TotalSuccess, &t.TotalFailed, &t.UniqueIPs, &t.UniqueCountries, &t.LastError, &t.SweepNextSessid); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -89,7 +92,7 @@ func (db *DB) GetTask(ctx context.Context, id int64) (*TaskRow, error) {
 }
 
 func (db *DB) ListTasks(ctx context.Context) ([]*TaskRow, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, name, config_json, state, created_at, started_at, paused_at, finished_at, elapsed_seconds, total_requests, total_success, total_failed, unique_ips, unique_countries, last_error FROM tasks ORDER BY id DESC`)
+	rows, err := db.QueryContext(ctx, `SELECT id, name, config_json, state, created_at, started_at, paused_at, finished_at, elapsed_seconds, total_requests, total_success, total_failed, unique_ips, unique_countries, last_error, sweep_next_sessid FROM tasks ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +101,7 @@ func (db *DB) ListTasks(ctx context.Context) ([]*TaskRow, error) {
 	for rows.Next() {
 		t := &TaskRow{}
 		var cfg string
-		if err := rows.Scan(&t.ID, &t.Name, &cfg, &t.State, &t.CreatedAt, &t.StartedAt, &t.PausedAt, &t.FinishedAt, &t.ElapsedSeconds, &t.TotalRequests, &t.TotalSuccess, &t.TotalFailed, &t.UniqueIPs, &t.UniqueCountries, &t.LastError); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &cfg, &t.State, &t.CreatedAt, &t.StartedAt, &t.PausedAt, &t.FinishedAt, &t.ElapsedSeconds, &t.TotalRequests, &t.TotalSuccess, &t.TotalFailed, &t.UniqueIPs, &t.UniqueCountries, &t.LastError, &t.SweepNextSessid); err != nil {
 			return nil, err
 		}
 		t.ConfigJSON = json.RawMessage(cfg)
@@ -115,46 +118,55 @@ func (db *DB) UpdateTaskState(ctx context.Context, id int64, state TaskState, ex
 		args = append(args, v)
 	}
 	args = append(args, id)
-	_, err := db.ExecContext(ctx, "UPDATE tasks SET "+strings.Join(parts, ",")+" WHERE id=?", args...)
+	_, err := db.execWriteContext(ctx, "UPDATE tasks SET "+strings.Join(parts, ",")+" WHERE id=?", args...)
 	return err
 }
 
 func (db *DB) UpdateTaskMetrics(ctx context.Context, id int64, total, success, failed, uniqueIPs, uniqueCountries int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE tasks SET total_requests=?, total_success=?, total_failed=?, unique_ips=?, unique_countries=? WHERE id=?`,
+	_, err := db.execWriteContext(ctx, `UPDATE tasks SET total_requests=?, total_success=?, total_failed=?, unique_ips=?, unique_countries=? WHERE id=?`,
 		total, success, failed, uniqueIPs, uniqueCountries, id)
 	return err
 }
 
 func (db *DB) DeleteTask(ctx context.Context, id int64) error {
-	_, err := db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
+	_, err := db.execWriteContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
 	return err
 }
 
 func (db *DB) UpdateTask(ctx context.Context, id int64, name string, configJSON []byte) error {
-	_, err := db.ExecContext(ctx, `UPDATE tasks SET name=?, config_json=? WHERE id=?`,
-		name, string(configJSON), id)
-	return err
+	return db.withWriteTx(ctx, func(tx writeTransaction) error {
+		var previous string
+		if err := tx.QueryRowContext(ctx, `SELECT config_json FROM tasks WHERE id=?`, id).Scan(&previous); err != nil {
+			return err
+		}
+		oldRange, err := sweepRange([]byte(previous))
+		if err != nil {
+			return err
+		}
+		newRange, err := sweepRange(configJSON)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE tasks SET name=?, config_json=?, sweep_next_sessid=CASE WHEN ? THEN NULL ELSE sweep_next_sessid END, report_cache=NULL, report_cache_ts=NULL WHERE id=?`,
+			name, string(configJSON), oldRange != newRange, id)
+		return err
+	})
 }
 
 func (db *DB) ClearTaskData(ctx context.Context, id int64) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
+	return db.withWriteTx(ctx, func(tx writeTransaction) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM samples WHERE task_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_sessions WHERE task_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM metrics_snapshots WHERE task_id=?`, id); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE tasks SET total_requests=0,total_success=0,total_failed=0,unique_ips=0,unique_countries=0,elapsed_seconds=0,report_cache=NULL,report_cache_ts=NULL,sweep_next_sessid=NULL WHERE id=?`, id)
 		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM samples WHERE task_id=?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM probe_sessions WHERE task_id=?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM metrics_snapshots WHERE task_id=?`, id); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET total_requests=0,total_success=0,total_failed=0,unique_ips=0,unique_countries=0,elapsed_seconds=0,report_cache=NULL,report_cache_ts=NULL WHERE id=?`, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 // GetReportCache 返回缓存的报表 JSON(可能为 nil)
@@ -172,14 +184,14 @@ func (db *DB) GetReportCache(ctx context.Context, taskID int64) ([]byte, error) 
 
 // SetReportCache 写入缓存
 func (db *DB) SetReportCache(ctx context.Context, taskID int64, body []byte) error {
-	_, err := db.ExecContext(ctx, `UPDATE tasks SET report_cache=?, report_cache_ts=? WHERE id=?`,
+	_, err := db.execWriteContext(ctx, `UPDATE tasks SET report_cache=?, report_cache_ts=? WHERE id=?`,
 		string(body), time.Now().UnixMilli(), taskID)
 	return err
 }
 
 // InvalidateReportCache 清空缓存(任务启动/清空数据时调用)
 func (db *DB) InvalidateReportCache(ctx context.Context, taskID int64) error {
-	_, err := db.ExecContext(ctx, `UPDATE tasks SET report_cache=NULL, report_cache_ts=NULL WHERE id=?`, taskID)
+	_, err := db.execWriteContext(ctx, `UPDATE tasks SET report_cache=NULL, report_cache_ts=NULL WHERE id=?`, taskID)
 	return err
 }
 
@@ -284,22 +296,22 @@ func (db *DB) MetricsHistory(ctx context.Context, taskID int64) ([]MetricsPoint,
 }
 
 func (db *DB) InsertMetricsSnapshot(ctx context.Context, taskID int64, p MetricsPoint) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO metrics_snapshots (task_id,ts,total_reqs,success,failed,unique_ips,hit_rate_window,qps) VALUES (?,?,?,?,?,?,?,?)`,
+	_, err := db.execWriteContext(ctx, `INSERT INTO metrics_snapshots (task_id,ts,total_reqs,success,failed,unique_ips,hit_rate_window,qps) VALUES (?,?,?,?,?,?,?,?)`,
 		taskID, p.TS, p.TotalReqs, p.Success, p.Failed, p.UniqueIPs, p.HitRateWindow, p.QPS)
 	return err
 }
 
 // 粘性 session
 type ProbeSession struct {
-	Sessid               int64  `json:"sessid"`
-	FirstIP              string `json:"first_ip"`
-	CurrentIP            string `json:"current_ip"`
-	IPChanges            int64  `json:"ip_changes"`
-	PollCount            int64  `json:"poll_count"`
-	FirstSeen            int64  `json:"first_seen"`
-	LastSeen             int64  `json:"last_seen"`
-	LongestHoldSeconds   int64  `json:"longest_hold_seconds"`
-	CurrentIPSinceMs     int64  `json:"current_ip_since"`
+	Sessid             int64  `json:"sessid"`
+	FirstIP            string `json:"first_ip"`
+	CurrentIP          string `json:"current_ip"`
+	IPChanges          int64  `json:"ip_changes"`
+	PollCount          int64  `json:"poll_count"`
+	FirstSeen          int64  `json:"first_seen"`
+	LastSeen           int64  `json:"last_seen"`
+	LongestHoldSeconds int64  `json:"longest_hold_seconds"`
+	CurrentIPSinceMs   int64  `json:"current_ip_since"`
 }
 
 func (db *DB) ListProbeSessions(ctx context.Context, taskID int64) ([]ProbeSession, error) {
@@ -321,69 +333,60 @@ func (db *DB) ListProbeSessions(ctx context.Context, taskID int64) ([]ProbeSessi
 
 // UpsertProbeSession 更新粘性会话状态; 返回是否换IP
 func (db *DB) UpsertProbeSession(ctx context.Context, taskID, sessid int64, ip string, ts int64) (changed bool, err error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-
-	var (
-		curIP      sql.NullString
-		curSince   sql.NullInt64
-		longest    int64
-		ipChanges  int64
-		pollCount  int64
-		firstSeen  sql.NullInt64
-	)
-	err = tx.QueryRowContext(ctx, `SELECT current_ip, current_ip_since, longest_hold_seconds, ip_changes, poll_count, first_seen FROM probe_sessions WHERE task_id=? AND sessid=?`, taskID, sessid).Scan(&curIP, &curSince, &longest, &ipChanges, &pollCount, &firstSeen)
-	exists := err == nil
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-
-	if !exists {
-		_, err = tx.ExecContext(ctx,
-			`INSERT INTO probe_sessions (task_id, sessid, first_ip, current_ip, ip_changes, poll_count, first_seen, last_seen, longest_hold_seconds, current_ip_since) VALUES (?,?,?,?,0,1,?,?,0,?)`,
-			taskID, sessid, ip, ip, ts, ts, ts)
-		if err != nil {
-			return false, err
+	err = db.withWriteTx(ctx, func(tx writeTransaction) error {
+		var (
+			curIP     sql.NullString
+			curSince  sql.NullInt64
+			longest   int64
+			ipChanges int64
+			pollCount int64
+			firstSeen sql.NullInt64
+		)
+		txErr := tx.QueryRowContext(ctx, `SELECT current_ip, current_ip_since, longest_hold_seconds, ip_changes, poll_count, first_seen FROM probe_sessions WHERE task_id=? AND sessid=?`, taskID, sessid).Scan(&curIP, &curSince, &longest, &ipChanges, &pollCount, &firstSeen)
+		exists := txErr == nil
+		if txErr != nil && !errors.Is(txErr, sql.ErrNoRows) {
+			return txErr
 		}
-		return false, tx.Commit()
-	}
 
-	changed = curIP.Valid && curIP.String != ip && ip != ""
-	if changed {
-		// 锁定之前 IP 的保持时长
-		if curSince.Valid {
-			hold := (ts - curSince.Int64) / 1000
-			if hold > longest {
-				longest = hold
+		if !exists {
+			_, txErr = tx.ExecContext(ctx,
+				`INSERT INTO probe_sessions (task_id, sessid, first_ip, current_ip, ip_changes, poll_count, first_seen, last_seen, longest_hold_seconds, current_ip_since) VALUES (?,?,?,?,0,1,?,?,0,?)`,
+				taskID, sessid, ip, ip, ts, ts, ts)
+			return txErr
+		}
+
+		changed = curIP.Valid && curIP.String != ip && ip != ""
+		if changed {
+			// 锁定之前 IP 的保持时长
+			if curSince.Valid {
+				hold := (ts - curSince.Int64) / 1000
+				if hold > longest {
+					longest = hold
+				}
 			}
-		}
-		ipChanges++
-		_, err = tx.ExecContext(ctx,
-			`UPDATE probe_sessions SET current_ip=?, current_ip_since=?, last_seen=?, poll_count=poll_count+1, ip_changes=?, longest_hold_seconds=? WHERE task_id=? AND sessid=?`,
-			ip, ts, ts, ipChanges, longest, taskID, sessid)
-	} else {
-		// 同 IP, 更新最长持续时长
-		if curSince.Valid && ip != "" {
-			hold := (ts - curSince.Int64) / 1000
-			if hold > longest {
-				longest = hold
+			ipChanges++
+			_, txErr = tx.ExecContext(ctx,
+				`UPDATE probe_sessions SET current_ip=?, current_ip_since=?, last_seen=?, poll_count=poll_count+1, ip_changes=?, longest_hold_seconds=? WHERE task_id=? AND sessid=?`,
+				ip, ts, ts, ipChanges, longest, taskID, sessid)
+		} else {
+			// 同 IP, 更新最长持续时长
+			if curSince.Valid && ip != "" {
+				hold := (ts - curSince.Int64) / 1000
+				if hold > longest {
+					longest = hold
+				}
 			}
+			ipStr := curIP.String
+			if !curIP.Valid && ip != "" {
+				ipStr = ip
+			}
+			_, txErr = tx.ExecContext(ctx,
+				`UPDATE probe_sessions SET current_ip=?, last_seen=?, poll_count=poll_count+1, longest_hold_seconds=? WHERE task_id=? AND sessid=?`,
+				ipStr, ts, longest, taskID, sessid)
 		}
-		ipStr := curIP.String
-		if !curIP.Valid && ip != "" {
-			ipStr = ip
-		}
-		_, err = tx.ExecContext(ctx,
-			`UPDATE probe_sessions SET current_ip=?, last_seen=?, poll_count=poll_count+1, longest_hold_seconds=? WHERE task_id=? AND sessid=?`,
-			ipStr, ts, longest, taskID, sessid)
-	}
-	if err != nil {
-		return false, err
-	}
-	return changed, tx.Commit()
+		return txErr
+	})
+	return changed, err
 }
 
 // SamplesPage 用于前端分页查看
@@ -405,9 +408,9 @@ func (db *DB) RecentSamples(ctx context.Context, taskID int64, limit int) (*Samp
 	items := []map[string]interface{}{}
 	for rows.Next() {
 		var (
-			id, sessid, latency, ts int64
+			id, sessid, latency, ts                    int64
 			worker, ip, country, city, errKind, errMsg string
-			ok int64
+			ok                                         int64
 		)
 		if err := rows.Scan(&id, &worker, &sessid, &ip, &country, &city, &latency, &ok, &errKind, &errMsg, &ts); err != nil {
 			return nil, err

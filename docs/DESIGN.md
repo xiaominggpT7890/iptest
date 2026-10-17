@@ -27,7 +27,9 @@ user-{account}-region-{region}-sessid-{N}-sesstime-{ttl}:{password}@gate3.abcsoc
 ### A. PoolSweeper（探池）
 
 - 启动 N 个 goroutine（`config.concurrency`）
-- 每个 goroutine 在 `sessid_range` 内**随机抽取** → 通过 SOCKS5 请求 cityinfo → 落库 → 立刻下一轮
+- `sessid_range.mode` 默认 `random`：每个 goroutine 在范围内随机抽取；`sequential`：所有 goroutine 共用递增取号器，从最小值依次取到最大值，再回到最小值循环。
+- 通过 SOCKS5 请求 cityinfo → 落库 → 立刻领取下一个号码；并发只影响请求完成顺序，不能保证不同号码对应不同出口 IP。
+- 顺序游标按块持久化，正常暂停后接着取；清空任务或修改范围/模式时重置到下限。
 - 不维护任何会话生命周期，纯暴力探池
 - 回答：**池子有多大、地区分布、命中率曲线**
 
@@ -195,7 +197,7 @@ PRAGMA：`journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`, `temp_st
     "sesstime": 600
   },
   "target_url": "https://api.skyvora.cc/appapi/geo/cityinfo",
-  "sessid_range": { "min": 1000000, "max": 9000000 },
+  "sessid_range": { "min": 1000000, "max": 9000000, "mode": "random" },
   "duration_seconds": 1800,           // 0 = 不限时
   "concurrency": 500,                 // PoolSweeper 并发
   "request_timeout_ms": 15000,
@@ -217,7 +219,8 @@ PRAGMA：`journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-64000`, `temp_st
 
 校验规则（`config.Validate`）：
 - proxy.host/port/account/password 必填
-- sessid_range.max > min
+- sessid_range.min >= 0，max >= min；mode 只能为 random 或 sequential（省略时默认 random）。
+- 粘性探针跟踪数量不能超过范围容量。
 - concurrency ≤ 30000
 - 至少启用 pool_sweep 或 stickiness_probe 之一
 

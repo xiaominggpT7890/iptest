@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -36,9 +37,15 @@ type ProxyConfig struct {
 }
 
 type SessidRange struct {
-	Min int64 `json:"min"`
-	Max int64 `json:"max"`
+	Min  int64  `json:"min"`
+	Max  int64  `json:"max"`
+	Mode string `json:"mode"`
 }
+
+const (
+	SessidRandom     = "random"
+	SessidSequential = "sequential"
+)
 
 type PoolSweepConfig struct {
 	Enabled           bool    `json:"enabled"`
@@ -54,6 +61,7 @@ type StickinessProbeConfig struct {
 }
 
 func (c *TaskConfig) Validate() error {
+	c.Proxy.Template = normalizeProxyTemplate(c.Proxy.Template)
 	if c.Proxy.Scheme == "" {
 		c.Proxy.Scheme = "socks5"
 	}
@@ -78,8 +86,17 @@ func (c *TaskConfig) Validate() error {
 	if c.Sessid.Min == 0 && c.Sessid.Max == 0 {
 		c.Sessid.Min, c.Sessid.Max = 1_000_000, 9_000_000
 	}
-	if c.Sessid.Max <= c.Sessid.Min {
-		return errors.New("sessid_range.max must > min")
+	if c.Sessid.Mode == "" {
+		c.Sessid.Mode = SessidRandom
+	}
+	if c.Sessid.Mode != SessidRandom && c.Sessid.Mode != SessidSequential {
+		return errors.New("sessid_range.mode must be random or sequential")
+	}
+	if c.Sessid.Min < 0 || c.Sessid.Max < c.Sessid.Min || c.Sessid.Max-c.Sessid.Min == math.MaxInt64 {
+		return errors.New("sessid_range must be nonnegative, ordered and fit in int64")
+	}
+	if c.Sessid.Mode == SessidSequential && c.Sessid.Max == math.MaxInt64 {
+		return errors.New("sequential sessid_range.max must be less than int64 maximum")
 	}
 	if c.Concurrency <= 0 {
 		c.Concurrency = 200
@@ -100,6 +117,9 @@ func (c *TaskConfig) Validate() error {
 		if c.StickinessProbe.SessidCount <= 0 {
 			c.StickinessProbe.SessidCount = 50
 		}
+		if int64(c.StickinessProbe.SessidCount) > c.Sessid.Max-c.Sessid.Min+1 {
+			return errors.New("stickiness_probe.sessid_count cannot exceed sessid range capacity")
+		}
 		if len(c.StickinessProbe.PollScheduleSeconds) == 0 {
 			c.StickinessProbe.PollScheduleSeconds = []int{60}
 			c.StickinessProbe.LoopSchedule = true
@@ -115,7 +135,7 @@ func (c *TaskConfig) Validate() error {
 
 // ParseProxyTemplate 解析 "USER:PASS@HOST:PORT"
 func ParseProxyTemplate(s string) (userTpl, password, host string, port int, err error) {
-	s = strings.TrimSpace(s)
+	s = normalizeProxyTemplate(s)
 	for _, p := range []string{"socks5h://", "socks5://", "socks://"} {
 		if strings.HasPrefix(s, p) {
 			s = s[len(p):]
@@ -145,6 +165,20 @@ func ParseProxyTemplate(s string) (userTpl, password, host string, port int, err
 		return "", "", "", 0, fmt.Errorf("invalid port %q", p)
 	}
 	return userTpl, password, h, portN, nil
+}
+
+func normalizeProxyTemplate(s string) string {
+	s = strings.TrimSpace(s)
+	at := strings.LastIndex(s, "@")
+	if at < 0 {
+		return s
+	}
+	colon := strings.LastIndex(s[at+1:], ":")
+	if colon < 0 {
+		return s[:at+1] + strings.TrimSpace(s[at+1:])
+	}
+	colon += at + 1
+	return s[:at+1] + strings.TrimSpace(s[at+1:colon]) + ":" + strings.TrimSpace(s[colon+1:])
 }
 
 func ParseTaskConfig(b []byte) (*TaskConfig, error) {

@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     unique_countries INTEGER NOT NULL DEFAULT 0,
     last_error      TEXT,
     report_cache    TEXT,
-    report_cache_ts INTEGER
+    report_cache_ts INTEGER,
+    sweep_next_sessid INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS samples (
